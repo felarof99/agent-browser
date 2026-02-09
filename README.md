@@ -1,8 +1,63 @@
-# agent-browser
+# agent-browser (BrowserOS fork)
 
-Headless browser automation CLI for AI agents. Fast Rust CLI with Node.js fallback.
+Browser automation CLI for AI agents, configured to work with [BrowserOS](https://browseros.com).
 
-## Installation
+## BrowserOS Quick Start
+
+### Build & Install
+
+```bash
+git clone https://github.com/felarof99/agent-browser
+cd agent-browser
+pnpm install
+pnpm build
+rustup target add aarch64-apple-darwin x86_64-apple-darwin  # one-time setup
+pnpm build:macos
+npm pack
+npm install -g ./agent-browser-0.9.1.tgz
+```
+
+### Shell Setup
+
+Add to `~/.zshrc`:
+
+```bash
+export AGENT_BROWSER_EXECUTABLE_PATH="/Applications/BrowserOS.app/Contents/MacOS/BrowserOS"
+export BROWSEROS_CDP_PORT=9747
+```
+
+### Usage
+
+```bash
+# Connect to your running BrowserOS instance (most common)
+agent-browser --existing open https://example.com
+agent-browser --existing snapshot
+agent-browser --existing click @e2
+
+# Connect to a named profile
+agent-browser --existing Work open https://example.com
+
+# Launch a fresh BrowserOS instance with a new profile
+agent-browser --new open https://example.com
+
+# All standard agent-browser commands work
+agent-browser --existing snapshot -i        # interactive elements only
+agent-browser --existing fill @e3 "hello"   # fill input
+agent-browser --existing screenshot page.png
+agent-browser --existing tab                # list tabs
+agent-browser --existing tab 2              # switch tab
+```
+
+### Rebuild after code changes
+
+```bash
+pnpm build && pnpm build:macos && npm pack
+npm uninstall -g agent-browser && npm install -g ./agent-browser-0.9.1.tgz
+```
+
+---
+
+## Installation (upstream)
 
 ### npm (recommended)
 
