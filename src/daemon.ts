@@ -23,6 +23,31 @@ let streamServer: StreamServer | null = null;
 
 // Default stream port (can be overridden with AGENT_BROWSER_STREAM_PORT)
 const DEFAULT_STREAM_PORT = 9223;
+export const DEFAULT_BROWSEROS_EXECUTABLE_PATH =
+  '/Applications/BrowserOS.app/Contents/MacOS/BrowserOS';
+
+/**
+ * Resolve executable path for desktop browser launch.
+ * Priority:
+ * 1. AGENT_BROWSER_EXECUTABLE_PATH (if non-empty)
+ * 2. BrowserOS default path on macOS (if installed)
+ * 3. undefined (Playwright-managed Chromium)
+ */
+export function resolveExecutablePath(
+  envExecutablePath: string | undefined = process.env.AGENT_BROWSER_EXECUTABLE_PATH,
+  platform: NodeJS.Platform = process.platform
+): string | undefined {
+  const configuredPath = envExecutablePath?.trim();
+  if (configuredPath) {
+    return configuredPath;
+  }
+
+  if (platform === 'darwin') {
+    return DEFAULT_BROWSEROS_EXECUTABLE_PATH;
+  }
+
+  return undefined;
+}
 
 /**
  * Set the current session
@@ -268,6 +293,19 @@ export async function startDaemon(options?: {
             continue;
           }
 
+          // Ensure explicit launch commands also inherit the executable default.
+          // Without this, CLI-triggered prelaunch (e.g. --headed) can ignore daemon defaults.
+          if (
+            !isIOS &&
+            manager instanceof BrowserManager &&
+            parseResult.command.action === 'launch'
+          ) {
+            const launchCommand = parseResult.command as { executablePath?: string };
+            if (!launchCommand.executablePath) {
+              launchCommand.executablePath = resolveExecutablePath();
+            }
+          }
+
           // Auto-launch if not already launched and this isn't a launch/close command
           if (
             !manager.isLaunched() &&
@@ -316,7 +354,7 @@ export async function startDaemon(options?: {
                 id: 'auto',
                 action: 'launch' as const,
                 headless: process.env.AGENT_BROWSER_HEADED !== '1',
-                executablePath: process.env.AGENT_BROWSER_EXECUTABLE_PATH,
+                executablePath: resolveExecutablePath(),
                 extensions: extensions,
                 profile: process.env.AGENT_BROWSER_PROFILE,
                 storageState: process.env.AGENT_BROWSER_STATE,

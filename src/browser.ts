@@ -16,7 +16,9 @@ import {
 } from 'playwright-core';
 import path from 'node:path';
 import os from 'node:os';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { createServer } from 'node:net';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { spawn, type ChildProcess } from 'node:child_process';
 import type { LaunchCommand } from './types.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
 
@@ -102,6 +104,8 @@ export class BrowserManager {
   private recordingPage: Page | null = null;
   private recordingOutputPath: string = '';
   private recordingTempDir: string = '';
+  private managedBrowserProcess: ChildProcess | null = null;
+  private managedBrowserProfileDir: string | null = null;
 
   /**
    * Check if browser is launched
@@ -1077,6 +1081,11 @@ export class BrowserManager {
       return;
     }
 
+    if (this.shouldLaunchBrowserOSViaCDP(options)) {
+      await this.launchBrowserOSViaCDP(options);
+      return;
+    }
+
     const browserType = options.browser ?? 'chromium';
     if (hasExtensions && browserType !== 'chromium') {
       throw new Error('Extensions are only supported in Chromium');
@@ -1171,6 +1180,135 @@ export class BrowserManager {
     this.activePageIndex = this.pages.length > 0 ? this.pages.length - 1 : 0;
   }
 
+  private shouldLaunchBrowserOSViaCDP(options: LaunchCommand): boolean {
+    const executablePath = options.executablePath?.toLowerCase();
+    if (!executablePath) return false;
+    return executablePath.includes('/browseros.app/') || executablePath.endsWith('/browseros');
+  }
+
+  private async launchBrowserOSViaCDP(options: LaunchCommand): Promise<void> {
+    const executablePath = options.executablePath;
+    if (!executablePath) {
+      throw new Error('BrowserOS executable path is required');
+    }
+
+    const cdpPort = await this.getAvailablePort();
+    const mcpPort = await this.getAvailablePort();
+    const agentPort = await this.getAvailablePort();
+    const extensionPort = await this.getAvailablePort();
+    const profileDir = mkdtempSync(path.join(os.tmpdir(), 'agent-browser-browseros-'));
+
+    const browserArgs = [
+      '--use-mock-keychain',
+      '--show-component-extension-options',
+      '--enable-logging=stderr',
+      '--disable-browseros-server',
+      `--remote-debugging-port=${cdpPort}`,
+      `--browseros-mcp-port=${mcpPort}`,
+      `--browseros-agent-port=${agentPort}`,
+      `--browseros-extension-port=${extensionPort}`,
+      `--user-data-dir=${profileDir}`,
+    ];
+
+    if (options.headless) {
+      browserArgs.push('--headless=new');
+    }
+
+    if (options.args?.length) {
+      browserArgs.push(...options.args);
+    }
+
+    const process = spawn(executablePath, browserArgs, {
+      stdio: 'ignore',
+      detached: false,
+    });
+
+    this.managedBrowserProcess = process;
+    this.managedBrowserProfileDir = profileDir;
+
+    try {
+      await this.waitForCDPEndpoint(cdpPort, 15000);
+      await this.connectViaCDP(String(cdpPort));
+    } catch (error) {
+      await this.terminateManagedBrowserProcess();
+      throw error;
+    }
+  }
+
+  private async getAvailablePort(): Promise<number> {
+    return await new Promise((resolve, reject) => {
+      const server = createServer();
+      server.unref();
+      server.on('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        const address = server.address();
+        if (!address || typeof address === 'string') {
+          server.close(() => reject(new Error('Unable to determine dynamic port')));
+          return;
+        }
+        const { port } = address;
+        server.close(() => resolve(port));
+      });
+    });
+  }
+
+  private async waitForCDPEndpoint(port: number, timeoutMs: number): Promise<void> {
+    const endpoint = `http://127.0.0.1:${port}/json/version`;
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      if (this.managedBrowserProcess && this.managedBrowserProcess.exitCode !== null) {
+        throw new Error(
+          `BrowserOS exited before CDP was ready (exit code ${this.managedBrowserProcess.exitCode})`
+        );
+      }
+
+      try {
+        const response = await fetch(endpoint);
+        if (response.ok) {
+          return;
+        }
+      } catch {
+        // Retry until timeout
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+
+    throw new Error(`Timed out waiting for BrowserOS CDP endpoint on port ${port}`);
+  }
+
+  private async terminateManagedBrowserProcess(): Promise<void> {
+    const process = this.managedBrowserProcess;
+    this.managedBrowserProcess = null;
+
+    if (process && process.exitCode === null) {
+      try {
+        process.kill('SIGTERM');
+      } catch {
+        // Ignore kill errors
+      }
+
+      const deadline = Date.now() + 2000;
+      while (process.exitCode === null && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      if (process.exitCode === null) {
+        try {
+          process.kill('SIGKILL');
+        } catch {
+          // Ignore kill errors
+        }
+      }
+    }
+
+    if (this.managedBrowserProfileDir) {
+      rmSync(this.managedBrowserProfileDir, { recursive: true, force: true });
+      this.managedBrowserProfileDir = null;
+    }
+  }
+
   /**
    * Connect to a running browser via CDP (Chrome DevTools Protocol)
    * @param cdpEndpoint Either a port number (as string) or a full WebSocket URL (ws:// or wss://)
@@ -1217,10 +1355,10 @@ export class BrowserManager {
       }
 
       // Filter out pages with empty URLs, which can cause Playwright to hang
-      const allPages = contexts.flatMap((context) => context.pages()).filter((page) => page.url());
-
+      let allPages = contexts.flatMap((context) => context.pages()).filter((page) => page.url());
       if (allPages.length === 0) {
-        throw new Error('No page found. Make sure the app has loaded content.');
+        const page = await contexts[0].newPage();
+        allPages = [page];
       }
 
       // All validation passed - commit state
@@ -1883,6 +2021,8 @@ export class BrowserManager {
         this.browser = null;
       }
     }
+
+    await this.terminateManagedBrowserProcess();
 
     this.pages = [];
     this.contexts = [];

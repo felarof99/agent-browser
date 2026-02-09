@@ -116,6 +116,20 @@ fn get_pid_path(session: &str) -> PathBuf {
     get_socket_dir().join(format!("{}.pid", session))
 }
 
+#[cfg(target_os = "macos")]
+const DEFAULT_BROWSEROS_EXECUTABLE_PATH: &str = "/Applications/BrowserOS.app/Contents/MacOS/BrowserOS";
+
+fn default_browseros_executable_path() -> Option<&'static str> {
+    #[cfg(target_os = "macos")]
+    {
+        if std::path::Path::new(DEFAULT_BROWSEROS_EXECUTABLE_PATH).exists() {
+            return Some(DEFAULT_BROWSEROS_EXECUTABLE_PATH);
+        }
+    }
+
+    None
+}
+
 /// Clean up stale socket and PID files for a session
 fn cleanup_stale_files(session: &str) {
     let pid_path = get_pid_path(session);
@@ -296,6 +310,12 @@ pub fn ensure_daemon(
         .find(|p| p.exists())
         .ok_or("Daemon not found. Set AGENT_BROWSER_HOME environment variable or run from project directory.")?;
 
+    let daemon_executable_path = executable_path
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| default_browseros_executable_path().map(ToString::to_string));
+
     // Spawn daemon as a fully detached background process
     #[cfg(unix)]
     {
@@ -310,7 +330,7 @@ pub fn ensure_daemon(
             cmd.env("AGENT_BROWSER_HEADED", "1");
         }
 
-        if let Some(path) = executable_path {
+        if let Some(path) = daemon_executable_path.as_deref() {
             cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
         }
 
@@ -389,7 +409,7 @@ pub fn ensure_daemon(
             cmd.env("AGENT_BROWSER_HEADED", "1");
         }
 
-        if let Some(path) = executable_path {
+        if let Some(path) = daemon_executable_path.as_deref() {
             cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
         }
 
