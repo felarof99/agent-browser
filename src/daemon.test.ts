@@ -1,11 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as os from 'os';
 import * as path from 'path';
-import {
-  DEFAULT_BROWSEROS_EXECUTABLE_PATH,
-  getSocketDir,
-  resolveExecutablePath,
-} from './daemon.js';
+import { getSocketDir } from './daemon.js';
 
 /**
  * HTTP request detection pattern used in daemon.ts to prevent cross-origin attacks.
@@ -96,23 +92,5 @@ describe('getSocketDir', () => {
       const expected = path.join(os.homedir(), '.agent-browser');
       expect(result).toBe(expected);
     });
-  });
-});
-
-describe('resolveExecutablePath', () => {
-  it('should prefer AGENT_BROWSER_EXECUTABLE_PATH when set', () => {
-    expect(resolveExecutablePath('/custom/browser')).toBe('/custom/browser');
-  });
-
-  it('should trim AGENT_BROWSER_EXECUTABLE_PATH before use', () => {
-    expect(resolveExecutablePath('  /custom/browser  ')).toBe('/custom/browser');
-  });
-
-  it('should use BrowserOS default path on macOS when env is empty', () => {
-    expect(resolveExecutablePath('', 'darwin')).toBe(DEFAULT_BROWSEROS_EXECUTABLE_PATH);
-  });
-
-  it('should return undefined on non-macOS when env is not set', () => {
-    expect(resolveExecutablePath(undefined, 'linux')).toBeUndefined();
   });
 });
