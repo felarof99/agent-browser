@@ -14,6 +14,7 @@ import {
   type CDPSession,
   type Video,
 } from 'playwright-core';
+import { execSync, spawn, type ChildProcess } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
@@ -76,6 +77,8 @@ export class BrowserManager {
   private browserUseApiKey: string | null = null;
   private kernelSessionId: string | null = null;
   private kernelApiKey: string | null = null;
+  private browserOSProcess: ChildProcess | null = null;
+  private launchProvider: string | null = null;
   private contexts: BrowserContext[] = [];
   private pages: Page[] = [];
   private activePageIndex: number = 0;
@@ -691,6 +694,239 @@ export class BrowserManager {
   }
 
   /**
+   * BrowserOS profile name from env, normalized for file paths and port derivation.
+   */
+  private getBrowserOSProfileName(): string {
+    const fromEnv = process.env.BROWSEROS_PROFILE_NAME?.trim();
+    if (!fromEnv) return 'default';
+    const normalized = fromEnv.replace(/[^A-Za-z0-9._-]/g, '-');
+    return normalized.length > 0 ? normalized : 'default';
+  }
+
+  /**
+   * BrowserOS CDP port.
+   * - Uses BROWSEROS_CDP_PORT if set
+   * - Otherwise uses 9747 for default profile and a deterministic derived port for named profiles
+   */
+  private getBrowserOSCDPPort(profileName: string): number {
+    const envPort = process.env.BROWSEROS_CDP_PORT;
+    if (envPort) {
+      const parsed = Number.parseInt(envPort, 10);
+      if (Number.isNaN(parsed) || parsed < 1 || parsed > 65535) {
+        throw new Error(
+          `Invalid BROWSEROS_CDP_PORT: ${envPort}. Expected an integer in range 1-65535.`
+        );
+      }
+      return parsed;
+    }
+
+    if (profileName === 'default') {
+      return 9747;
+    }
+
+    let hash = 0;
+    for (let i = 0; i < profileName.length; i++) {
+      hash = (hash * 31 + profileName.charCodeAt(i)) >>> 0;
+    }
+    return 10000 + (hash % 50000);
+  }
+
+  /**
+   * Resolve BrowserOS executable path.
+   * AGENT_BROWSER_EXECUTABLE_PATH takes precedence.
+   */
+  private getBrowserOSExecutablePath(): string {
+    if (process.env.AGENT_BROWSER_EXECUTABLE_PATH) {
+      return process.env.AGENT_BROWSER_EXECUTABLE_PATH;
+    }
+
+    const home = os.homedir();
+    const candidates =
+      process.platform === 'darwin'
+        ? [
+            '/Applications/BrowserOS.app/Contents/MacOS/BrowserOS',
+            path.join(home, '.browseros', 'BrowserOS.app', 'Contents', 'MacOS', 'BrowserOS'),
+          ]
+        : process.platform === 'win32'
+          ? [
+              path.join(home, '.browseros', 'BrowserOS.exe'),
+              'C:\\Program Files\\BrowserOS\\BrowserOS.exe',
+            ]
+          : [
+              path.join(home, '.browseros', 'bin', 'BrowserOS'),
+              path.join(home, '.browseros', 'bin', 'BrowserOS.AppImage'),
+            ];
+
+    const existing = candidates.find((candidate) => existsSync(candidate));
+    return existing ?? candidates[0];
+  }
+
+  /**
+   * Resolve BrowserOS user-data-dir for named profiles.
+   */
+  private getBrowserOSProfilePath(profileName: string): string {
+    return path.join(os.homedir(), '.browseros', 'profiles', profileName);
+  }
+
+  private parseBrowserOSCDPPort(argsLine: string): number | null {
+    const parsePort = (raw: string | undefined): number | null => {
+      if (!raw) return null;
+      const parsed = Number.parseInt(raw, 10);
+      if (Number.isNaN(parsed) || parsed < 1 || parsed > 65535) {
+        return null;
+      }
+      return parsed;
+    };
+
+    const equalsPatterns = [/--remote-debugging-port=(\d{1,5})\b/, /--cdp-port=(\d{1,5})\b/];
+
+    for (const pattern of equalsPatterns) {
+      const match = argsLine.match(pattern);
+      if (match) {
+        return parsePort(match[1]);
+      }
+    }
+
+    const spacedPatterns = [/--remote-debugging-port\s+(\d{1,5})\b/, /--cdp-port\s+(\d{1,5})\b/];
+
+    for (const pattern of spacedPatterns) {
+      const match = argsLine.match(pattern);
+      if (match) {
+        return parsePort(match[1]);
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Detect BrowserOS CDP port from live browseros_server process args.
+   * Falls back to configured defaults when no process/port is found.
+   */
+  private detectBrowserOSCDPPortFromRuntime(profileName: string): number | null {
+    if (process.platform === 'win32') {
+      return null;
+    }
+
+    let psOutput = '';
+    try {
+      psOutput = execSync('ps aux', {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      return null;
+    }
+
+    const profilePath = this.getBrowserOSProfilePath(profileName);
+    const lines = psOutput
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.toLowerCase().includes('browseros_server'))
+      .filter((line) => line.includes('--remote-debugging-port') || line.includes('--cdp-port'));
+
+    if (lines.length === 0) {
+      return null;
+    }
+
+    const profileMatchedLine = lines.find((line) => line.includes(profilePath));
+    const prioritizedLines = profileMatchedLine
+      ? [profileMatchedLine, ...lines.filter((line) => line !== profileMatchedLine)]
+      : lines;
+
+    for (const line of prioritizedLines) {
+      const parsedPort = this.parseBrowserOSCDPPort(line);
+      if (parsedPort !== null) {
+        return parsedPort;
+      }
+    }
+
+    return null;
+  }
+
+  private async connectViaCDPWithRetry(
+    cdpEndpoint: string,
+    attempts: number,
+    delayMs: number
+  ): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        await this.connectViaCDP(cdpEndpoint);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt < attempts - 1) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  /**
+   * Connect to an already running BrowserOS instance via CDP.
+   */
+  private async connectToBrowserOSExisting(): Promise<void> {
+    const profileName = this.getBrowserOSProfileName();
+    const runtimePort = this.detectBrowserOSCDPPortFromRuntime(profileName);
+    const cdpPort = runtimePort ?? this.getBrowserOSCDPPort(profileName);
+    await this.connectViaCDPWithRetry(String(cdpPort), 3, 250);
+  }
+
+  /**
+   * Launch BrowserOS with a persistent profile and connect via CDP.
+   */
+  private async connectToBrowserOSNew(): Promise<void> {
+    const profileName = this.getBrowserOSProfileName();
+    const cdpPort = this.getBrowserOSCDPPort(profileName);
+    const executablePath = this.getBrowserOSExecutablePath();
+
+    if (!existsSync(executablePath)) {
+      throw new Error(
+        `BrowserOS executable not found at ${executablePath}. ` +
+          'Set AGENT_BROWSER_EXECUTABLE_PATH to your BrowserOS executable.'
+      );
+    }
+
+    const userDataDir = this.getBrowserOSProfilePath(profileName);
+    mkdirSync(userDataDir, { recursive: true });
+
+    const launchArgs = [
+      '--use-mock-keychain',
+      '--disable-browseros-server',
+      `--remote-debugging-port=${cdpPort}`,
+      `--user-data-dir=${userDataDir}`,
+    ];
+
+    const browserOSProcess = spawn(executablePath, launchArgs, {
+      stdio: 'ignore',
+    });
+
+    if (!browserOSProcess.pid) {
+      throw new Error(`Failed to launch BrowserOS from ${executablePath}`);
+    }
+
+    this.browserOSProcess = browserOSProcess;
+    browserOSProcess.once('exit', () => {
+      if (this.browserOSProcess === browserOSProcess) {
+        this.browserOSProcess = null;
+      }
+    });
+    browserOSProcess.unref();
+
+    try {
+      await this.connectViaCDPWithRetry(String(cdpPort), 40, 250);
+    } catch (error) {
+      if (!browserOSProcess.killed) {
+        browserOSProcess.kill('SIGTERM');
+      }
+      this.browserOSProcess = null;
+      throw error;
+    }
+  }
+
+  /**
    * Close a Browserbase session via API
    */
   private async closeBrowserbaseSession(sessionId: string, apiKey: string): Promise<void> {
@@ -1019,6 +1255,7 @@ export class BrowserManager {
   async launch(options: LaunchCommand): Promise<void> {
     // Determine CDP endpoint: prefer cdpUrl over cdpPort for flexibility
     const cdpEndpoint = options.cdpUrl ?? (options.cdpPort ? String(options.cdpPort) : undefined);
+    const provider = options.provider ?? process.env.AGENT_BROWSER_PROVIDER ?? null;
     const hasExtensions = !!options.extensions?.length;
     const hasProfile = !!options.profile;
     const hasStorageState = !!options.storageState;
@@ -1046,7 +1283,8 @@ export class BrowserManager {
     if (this.isLaunched()) {
       const needsRelaunch =
         (!cdpEndpoint && this.cdpEndpoint !== null) ||
-        (!!cdpEndpoint && this.needsCdpReconnect(cdpEndpoint));
+        (!!cdpEndpoint && this.needsCdpReconnect(cdpEndpoint)) ||
+        provider !== this.launchProvider;
       if (needsRelaunch) {
         await this.close();
       } else {
@@ -1056,24 +1294,37 @@ export class BrowserManager {
 
     if (cdpEndpoint) {
       await this.connectViaCDP(cdpEndpoint);
+      this.launchProvider = null;
       return;
     }
 
     // Cloud browser providers require explicit opt-in via -p flag or AGENT_BROWSER_PROVIDER env var
-    // -p flag takes precedence over env var
-    const provider = options.provider ?? process.env.AGENT_BROWSER_PROVIDER;
+    // -p flag takes precedence over env var.
+    if (provider === 'browseros-existing') {
+      await this.connectToBrowserOSExisting();
+      this.launchProvider = provider;
+      return;
+    }
+    if (provider === 'browseros-new') {
+      await this.connectToBrowserOSNew();
+      this.launchProvider = provider;
+      return;
+    }
     if (provider === 'browserbase') {
       await this.connectToBrowserbase();
+      this.launchProvider = provider;
       return;
     }
     if (provider === 'browseruse') {
       await this.connectToBrowserUse();
+      this.launchProvider = provider;
       return;
     }
 
     // Kernel: requires explicit opt-in via -p kernel flag or AGENT_BROWSER_PROVIDER=kernel
     if (provider === 'kernel') {
       await this.connectToKernel();
+      this.launchProvider = provider;
       return;
     }
 
@@ -1169,6 +1420,7 @@ export class BrowserManager {
       this.setupPageTracking(page);
     }
     this.activePageIndex = this.pages.length > 0 ? this.pages.length - 1 : 0;
+    this.launchProvider = null;
   }
 
   /**
@@ -1216,11 +1468,12 @@ export class BrowserManager {
         throw new Error('No browser context found. Make sure the app has an open window.');
       }
 
-      // Filter out pages with empty URLs, which can cause Playwright to hang
+      // Filter out pages with empty URLs, which can cause Playwright to hang.
+      // If none are available, create one page so commands can proceed.
       const allPages = contexts.flatMap((context) => context.pages()).filter((page) => page.url());
-
       if (allPages.length === 0) {
-        throw new Error('No page found. Make sure the app has loaded content.');
+        const page = await contexts[0].newPage();
+        allPages.push(page);
       }
 
       // All validation passed - commit state
@@ -1884,6 +2137,11 @@ export class BrowserManager {
       }
     }
 
+    if (this.browserOSProcess) {
+      this.browserOSProcess.kill('SIGTERM');
+      this.browserOSProcess = null;
+    }
+
     this.pages = [];
     this.contexts = [];
     this.cdpEndpoint = null;
@@ -1893,6 +2151,7 @@ export class BrowserManager {
     this.browserUseApiKey = null;
     this.kernelSessionId = null;
     this.kernelApiKey = null;
+    this.launchProvider = null;
     this.isPersistentContext = false;
     this.activePageIndex = 0;
     this.refMap = {};

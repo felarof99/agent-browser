@@ -1772,7 +1772,9 @@ Options:
                              e.g., --proxy-bypass "localhost,*.internal.com"
   --ignore-https-errors      Ignore HTTPS certificate errors
   --allow-file-access        Allow file:// URLs to access local files (Chromium only)
-  -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse
+  -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse, browseros-existing, browseros-new
+  --existing [profile]       Connect to existing BrowserOS profile (defaults to "default")
+  --new [profile]            Launch BrowserOS profile and connect via CDP
   --device <name>            iOS device name (e.g., "iPhone 15 Pro")
   --json                     JSON output
   --full, -f                 Full page screenshot
@@ -1784,10 +1786,12 @@ Options:
 Environment:
   AGENT_BROWSER_SESSION          Session name (default: "default")
   AGENT_BROWSER_EXECUTABLE_PATH  Custom browser executable path
-  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse)
+  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browseros-existing, browseros-new)
   AGENT_BROWSER_STREAM_PORT      Enable WebSocket streaming on port (e.g., 9223)
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
+  BROWSEROS_PROFILE_NAME         BrowserOS profile name for --existing/--new (default: "default")
+  BROWSEROS_CDP_PORT             BrowserOS CDP port override (default: derived from profile)
 
 Examples:
   agent-browser open example.com

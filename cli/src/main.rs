@@ -209,6 +209,7 @@ fn main() {
         flags.profile.as_deref(),
         flags.state.as_deref(),
         flags.provider.as_deref(),
+        flags.browseros_profile_name.as_deref(),
         flags.device.as_deref(),
     ) {
         Ok(result) => result,
@@ -264,6 +265,11 @@ fn main() {
             },
             if flags.cli_proxy_bypass {
                 Some("--proxy-bypass")
+            } else {
+                None
+            },
+            if flags.cli_browseros_mode {
+                Some("--existing/--new")
             } else {
                 None
             },

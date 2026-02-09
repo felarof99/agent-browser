@@ -1,5 +1,64 @@
 use std::env;
 
+fn looks_like_command_token(token: &str) -> bool {
+    matches!(
+        token,
+        "open"
+            | "goto"
+            | "navigate"
+            | "back"
+            | "forward"
+            | "reload"
+            | "click"
+            | "dblclick"
+            | "type"
+            | "fill"
+            | "press"
+            | "key"
+            | "keydown"
+            | "keyup"
+            | "hover"
+            | "focus"
+            | "select"
+            | "check"
+            | "uncheck"
+            | "scroll"
+            | "scrollintoview"
+            | "scrollinto"
+            | "drag"
+            | "upload"
+            | "download"
+            | "screenshot"
+            | "pdf"
+            | "snapshot"
+            | "eval"
+            | "get"
+            | "is"
+            | "find"
+            | "wait"
+            | "cookies"
+            | "storage"
+            | "dialog"
+            | "trace"
+            | "route"
+            | "unroute"
+            | "requests"
+            | "console"
+            | "errors"
+            | "highlight"
+            | "tab"
+            | "window"
+            | "record"
+            | "set"
+            | "mouse"
+            | "close"
+            | "install"
+            | "connect"
+            | "session"
+            | "device"
+    )
+}
+
 pub struct Flags {
     pub json: bool,
     pub full: bool,
@@ -20,6 +79,7 @@ pub struct Flags {
     pub ignore_https_errors: bool,
     pub allow_file_access: bool,
     pub device: Option<String>,
+    pub browseros_profile_name: Option<String>,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -32,6 +92,7 @@ pub struct Flags {
     pub cli_proxy: bool,
     pub cli_proxy_bypass: bool,
     pub cli_allow_file_access: bool,
+    pub cli_browseros_mode: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -65,6 +126,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         ignore_https_errors: false,
         allow_file_access: env::var("AGENT_BROWSER_ALLOW_FILE_ACCESS").is_ok(),
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok(),
+        browseros_profile_name: env::var("BROWSEROS_PROFILE_NAME").ok(),
         // Track CLI-passed flags (default false, set to true when flag is passed)
         cli_executable_path: false,
         cli_extensions: false,
@@ -75,6 +137,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_proxy: false,
         cli_proxy_bypass: false,
         cli_allow_file_access: false,
+        cli_browseros_mode: false,
     };
 
     let mut i = 0;
@@ -175,6 +238,26 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--existing" => {
+                flags.provider = Some("browseros-existing".to_string());
+                flags.cli_browseros_mode = true;
+                if let Some(name) = args.get(i + 1) {
+                    if !name.starts_with('-') && !looks_like_command_token(name) {
+                        flags.browseros_profile_name = Some(name.clone());
+                        i += 1;
+                    }
+                }
+            }
+            "--new" => {
+                flags.provider = Some("browseros-new".to_string());
+                flags.cli_browseros_mode = true;
+                if let Some(name) = args.get(i + 1) {
+                    if !name.starts_with('-') && !looks_like_command_token(name) {
+                        flags.browseros_profile_name = Some(name.clone());
+                        i += 1;
+                    }
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -184,7 +267,6 @@ pub fn parse_flags(args: &[String]) -> Flags {
 
 pub fn clean_args(args: &[String]) -> Vec<String> {
     let mut result = Vec::new();
-    let mut skip_next = false;
 
     // Global flags that should be stripped from command args
     const GLOBAL_FLAGS: &[&str] = &[
@@ -212,22 +294,40 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--provider",
         "--device",
     ];
+    // Global flags that may take an optional value
+    const GLOBAL_FLAGS_WITH_OPTIONAL_VALUE: &[&str] = &["--existing", "--new"];
 
-    for arg in args.iter() {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+
         if GLOBAL_FLAGS_WITH_VALUE.contains(&arg.as_str()) {
-            skip_next = true;
+            i += 1;
+            if i < args.len() {
+                i += 1;
+            }
             continue;
         }
+
+        if GLOBAL_FLAGS_WITH_OPTIONAL_VALUE.contains(&arg.as_str()) {
+            i += 1;
+            if i < args.len() && !args[i].starts_with('-') && !looks_like_command_token(&args[i])
+            {
+                i += 1;
+            }
+            continue;
+        }
+
         // Only strip known global flags, not command-specific flags
         if GLOBAL_FLAGS.contains(&arg.as_str()) || arg == "-f" {
+            i += 1;
             continue;
         }
+
         result.push(arg.clone());
+        i += 1;
     }
+
     result
 }
 
@@ -387,5 +487,33 @@ mod tests {
         assert!(flags.cli_proxy);
         assert!(!flags.cli_extensions);
         assert!(!flags.cli_state);
+    }
+
+    #[test]
+    fn test_parse_existing_with_profile_name() {
+        let flags = parse_flags(&args("--existing work open example.com"));
+        assert_eq!(flags.provider.as_deref(), Some("browseros-existing"));
+        assert_eq!(flags.browseros_profile_name.as_deref(), Some("work"));
+        assert!(flags.cli_browseros_mode);
+    }
+
+    #[test]
+    fn test_parse_new_without_profile_name() {
+        let flags = parse_flags(&args("--new open example.com"));
+        assert_eq!(flags.provider.as_deref(), Some("browseros-new"));
+        assert!(flags.browseros_profile_name.is_none());
+        assert!(flags.cli_browseros_mode);
+    }
+
+    #[test]
+    fn test_clean_args_removes_existing_with_optional_profile() {
+        let cleaned = clean_args(&args("--existing work open example.com"));
+        assert_eq!(cleaned, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_clean_args_removes_new_without_profile() {
+        let cleaned = clean_args(&args("--new open example.com"));
+        assert_eq!(cleaned, vec!["open", "example.com"]);
     }
 }

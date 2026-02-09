@@ -1429,6 +1429,7 @@ mod tests {
             ignore_https_errors: false,
             allow_file_access: false,
             device: None,
+            browseros_profile_name: None,
             cli_executable_path: false,
             cli_extensions: false,
             cli_profile: false,
@@ -1438,6 +1439,7 @@ mod tests {
             cli_proxy: false,
             cli_proxy_bypass: false,
             cli_allow_file_access: false,
+            cli_browseros_mode: false,
         }
     }
 

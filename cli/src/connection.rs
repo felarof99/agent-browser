@@ -217,6 +217,7 @@ pub fn ensure_daemon(
     profile: Option<&str>,
     state: Option<&str>,
     provider: Option<&str>,
+    browseros_profile_name: Option<&str>,
     device: Option<&str>,
 ) -> Result<DaemonResult, String> {
     // Check if daemon is running AND responsive
@@ -354,6 +355,10 @@ pub fn ensure_daemon(
             cmd.env("AGENT_BROWSER_PROVIDER", p);
         }
 
+        if let Some(name) = browseros_profile_name {
+            cmd.env("BROWSEROS_PROFILE_NAME", name);
+        }
+
         if let Some(d) = device {
             cmd.env("AGENT_BROWSER_IOS_DEVICE", d);
         }
@@ -431,6 +436,10 @@ pub fn ensure_daemon(
 
         if let Some(p) = provider {
             cmd.env("AGENT_BROWSER_PROVIDER", p);
+        }
+
+        if let Some(name) = browseros_profile_name {
+            cmd.env("BROWSEROS_PROFILE_NAME", name);
         }
 
         if let Some(d) = device {
